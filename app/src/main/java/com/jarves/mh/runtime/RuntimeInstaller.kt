@@ -21,6 +21,7 @@ import com.jarves.mh.model.DevStack
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
+import org.apache.commons.compress.compressors.xz.XZCompressorInputStream
 import org.apache.commons.compress.compressors.zstandard.ZstdCompressorInputStream
 import org.json.JSONObject
 
@@ -52,7 +53,7 @@ private data class RuntimeBundle(
 
 class RuntimeInstaller(private val context: Context) {
     private val runtimeDir = File(context.filesDir, "runtime")
-    private val rootfs = File(runtimeDir, "ubuntu")
+    private val rootfs = File(runtimeDir, "debian-arm64")
     private val downloads = File(context.cacheDir, "runtime-downloads")
     private val marker = File(rootfs, ".pocket-runtime-ready")
     private val bundledClaudeMarker = File(rootfs, ".pocket-bundled-claude-version")
@@ -140,69 +141,28 @@ class RuntimeInstaller(private val context: Context) {
 
         if (!File(rootfs, "usr/bin/bash").exists() || rootfsMarker.readTextOrNull() != ROOTFS_VERSION) {
             onProgress(RuntimeInstallProgress("Preparing the private development runtime", 0.03f))
-            val archive = obtainRuntimeBundle(
-                CORE_BUNDLE,
-                preferEmbedded = BuildConfig.OFFLINE_RUNTIME_BUNDLES,
-                from = 0.03f,
-                to = 0.25f,
-                onProgress,
-            )
-            onProgress(RuntimeInstallProgress("Verifying and unpacking the Core runtime", 0.28f))
-            val staging = File(runtimeDir, "ubuntu.installing")
+            val archive = obtainDebianRootfs(onProgress)
+            onProgress(RuntimeInstallProgress("Verifying and unpacking the Debian ARM64 rootfs", 0.28f))
+            val staging = File(runtimeDir, "debian-arm64.installing")
             staging.deleteRecursively()
             staging.mkdirs()
-            extractZstdTar(archive, staging)
+            extractXzTar(archive, staging)
             stripMacosMetadataArtifacts(staging)
-            require(File(staging, "usr/bin/bash").isFile) { "Core bundle is missing Bash" }
-            require(File(staging, "usr/local/bin/claude").isFile) { "Core bundle is missing Claude Code" }
+            require(File(staging, "usr/bin/bash").isFile || File(staging, "bin/bash").isFile) {
+                "Debian ARM64 rootfs is missing Bash"
+            }
             rootfs.deleteRecursively()
-            check(staging.renameTo(rootfs)) { "Could not activate the Linux environment" }
+            check(staging.renameTo(rootfs)) { "Could not activate the Debian ARM64 environment" }
+            rootfsMarker.parentFile?.mkdirs()
+            rootfsMarker.writeText(ROOTFS_VERSION)
             writeResolver()
             if (archive.parentFile == downloads) archive.delete()
         }
 
         val claude = File(rootfs, "usr/local/bin/claude")
-        check(claude.isFile) { "The Core runtime does not contain Claude Code" }
-        if (!marker.isFile) {
-            val bundledVersion = bundledClaudeMarker.readTextOrNull()
-            require(bundledVersion?.matches(CLAUDE_VERSION_PATTERN) == true) {
-                "The bundled Claude Code version is missing"
-            }
-            marker.writeText(bundledVersion)
-        }
+        claude.parentFile?.mkdirs()
+        ensureClaudeRuntime(claude, onProgress)
         ensureSettingsAndHooks()
-
-        if (hasInternetConnection()) {
-            onProgress(RuntimeInstallProgress("Checking the latest Claude Code release", 0.32f))
-            runCatching {
-                val latestVersion = fetchText("https://registry.npmjs.org/@anthropic-ai/claude-code/latest")
-                    .let { JSONObject(it).getString("version") }
-                    .also { require(it.matches(CLAUDE_VERSION_PATTERN)) }
-                if (marker.readText().trim() != latestVersion) {
-                    onProgress(RuntimeInstallProgress("Downloading Claude Code $latestVersion from Anthropic", 0.35f))
-                    val base = "https://downloads.claude.ai/claude-code-releases/$latestVersion"
-                    val manifest = JSONObject(fetchText("$base/manifest.json"))
-                    val checksum = manifest.getJSONObject("platforms").getJSONObject("linux-arm64").getString("checksum")
-                    val downloaded = File(downloads, "claude-$latestVersion")
-                    downloadVerified("$base/linux-arm64/claude", downloaded, checksum) { bytes, total ->
-                        val ratio = if (total > 0) bytes.toFloat() / total else 0f
-                        onProgress(RuntimeInstallProgress("Downloading Claude Code $latestVersion", 0.35f + ratio * 0.20f, bytes, total.takeIf { it > 0 }))
-                    }
-                    onProgress(RuntimeInstallProgress("Verifying Claude Code", 0.56f))
-                    claude.parentFile?.mkdirs()
-                    val staged = File(claude.parentFile, ".claude-$latestVersion.installing")
-                    downloaded.inputStream().use { input -> FileOutputStream(staged).use { input.copyTo(it) } }
-                    Os.chmod(staged.absolutePath, 0b111101101)
-                    Os.rename(staged.absolutePath, claude.absolutePath)
-                    downloaded.delete()
-                    marker.writeText(latestVersion)
-                }
-            }.onFailure {
-                onProgress(RuntimeInstallProgress("Using bundled Claude Code ${marker.readText().trim()}", 0.56f))
-            }
-        } else {
-            onProgress(RuntimeInstallProgress("Offline — using bundled Claude Code ${marker.readText().trim()}", 0.56f))
-        }
 
         val version = marker.readText().trim()
 
@@ -245,7 +205,7 @@ class RuntimeInstaller(private val context: Context) {
     }
 
     /**
-     * Installs one optional development stack inside Ubuntu. Safe to call again:
+     * Installs one optional development stack inside Debian. Safe to call again:
      * already-installed stacks return immediately without network access.
      */
     suspend fun ensureStackInstalled(
@@ -320,7 +280,7 @@ class RuntimeInstaller(private val context: Context) {
     }
 
     /**
-     * Installs Composer into Ubuntu from the official latest-stable release,
+     * Installs Composer into Debian from the official latest-stable release,
      * verified against getcomposer.org's published SHA-256 checksum.
      */
     private suspend fun installComposer(
@@ -399,7 +359,7 @@ class RuntimeInstaller(private val context: Context) {
         to: Float,
         onProgress: suspend (RuntimeInstallProgress) -> Unit,
     ) {
-        // Stack overlays honor the same offline/online flavor as the Core bundle:
+        // Stack overlays honor the same offline/online flavor as the Debian ARM64 rootfs:
         // the offline APK ships every stack bundle inside its assets, while the
         // online APK fetches each one from the release URL on demand.
         val archive = obtainRuntimeBundle(bundle, preferEmbedded = BuildConfig.OFFLINE_RUNTIME_BUNDLES, from, to * 0.8f + from * 0.2f, onProgress)
@@ -437,6 +397,66 @@ class RuntimeInstaller(private val context: Context) {
         if (removed > 0) {
             android.util.Log.i("RuntimeInstaller", "Stripped $removed macOS metadata artifacts")
         }
+    }
+
+    private suspend fun ensureClaudeRuntime(
+        claude: File,
+        onProgress: suspend (RuntimeInstallProgress) -> Unit,
+    ) {
+        if (marker.isFile && claude.isFile) return
+        val bundledVersion = bundledClaudeMarker.readTextOrNull()
+        if (!claude.isFile && bundledVersion?.matches(CLAUDE_VERSION_PATTERN) == true) {
+            error("The bundled Claude binary is missing from the Debian ARM64 rootfs")
+        }
+        check(hasInternetConnection()) {
+            "Claude Code is not bundled in this Debian rootfs and an internet connection is required for the first setup"
+        }
+        onProgress(RuntimeInstallProgress("Downloading Claude Code for Linux ARM64", 0.32f, indeterminate = true))
+        val latestVersion = fetchText("https://registry.npmjs.org/@anthropic-ai/claude-code/latest")
+            .let { JSONObject(it).getString("version") }
+            .also { require(it.matches(CLAUDE_VERSION_PATTERN)) }
+        val base = "https://downloads.claude.ai/claude-code-releases/$latestVersion"
+        val manifest = JSONObject(fetchText("$base/manifest.json"))
+        val checksum = manifest.getJSONObject("platforms").getJSONObject("linux-arm64").getString("checksum")
+        val downloaded = File(downloads, "claude-$latestVersion")
+        downloadVerified("$base/linux-arm64/claude", downloaded, checksum) { bytes, total ->
+            val ratio = if (total > 0) bytes.toFloat() / total else 0f
+            onProgress(RuntimeInstallProgress("Downloading Claude Code $latestVersion", 0.32f + ratio * 0.20f, bytes, total.takeIf { it > 0 }))
+        }
+        val staged = File(claude.parentFile, ".claude-$latestVersion.installing")
+        staged.delete()
+        downloaded.inputStream().use { input -> FileOutputStream(staged).use { input.copyTo(it) } }
+        Os.chmod(staged.absolutePath, 0b111101101)
+        Os.rename(staged.absolutePath, claude.absolutePath)
+        downloaded.delete()
+        marker.parentFile?.mkdirs()
+        marker.writeText(latestVersion)
+        onProgress(RuntimeInstallProgress("Claude Code $latestVersion is ready", 0.56f))
+    }
+
+    private suspend fun obtainDebianRootfs(
+        onProgress: suspend (RuntimeInstallProgress) -> Unit,
+    ): File {
+        downloads.mkdirs()
+        val archive = File(downloads, ROOTFS_FILE)
+        if (archive.isFile && digest(archive, "SHA-256").equals(ROOTFS_SHA256, ignoreCase = true)) {
+            onProgress(RuntimeInstallProgress("Using cached Debian ARM64 rootfs", 0.20f))
+            return archive
+        }
+        archive.delete()
+        onProgress(RuntimeInstallProgress("Downloading Debian 13 ARM64 rootfs", 0.05f, indeterminate = true))
+        downloadVerified(ROOTFS_URL, archive, ROOTFS_SHA256) { bytes, total ->
+            val ratio = if (total > 0) bytes.toFloat() / total else 0f
+            onProgress(
+                RuntimeInstallProgress(
+                    "Downloading Debian 13 ARM64 rootfs",
+                    0.05f + ratio * 0.20f,
+                    bytes,
+                    total.takeIf { it > 0 },
+                ),
+            )
+        }
+        return archive
     }
 
     private suspend fun obtainRuntimeBundle(
@@ -703,7 +723,7 @@ class RuntimeInstaller(private val context: Context) {
     ) {
         onProgress(
             RuntimeInstallProgress(
-                message = "Updating the private Ubuntu environment",
+                message = "Updating the private Debian environment",
                 fraction = 0.69f,
                 indeterminate = true,
             ),
@@ -721,7 +741,7 @@ class RuntimeInstaller(private val context: Context) {
             fraction = 0.69f,
             timeoutMs = 35 * 60 * 1_000L,
             onProgress = onProgress,
-            failureMessage = "Ubuntu maintenance could not be completed",
+            failureMessage = "Debian maintenance could not be completed",
         )
     }
 
@@ -1070,9 +1090,9 @@ printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decis
             capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
     }
 
-    private fun extractRootfs(archive: File, destination: File) {
+    private fun extractXzTar(archive: File, destination: File) {
         val deferredLinks = mutableListOf<Pair<File, File>>()
-        TarArchiveInputStream(GzipCompressorInputStream(BufferedInputStream(archive.inputStream()))).use { tar ->
+        TarArchiveInputStream(XZCompressorInputStream(BufferedInputStream(archive.inputStream()))).use { tar ->
             var entry: TarArchiveEntry? = tar.nextEntry
             while (entry != null) {
                 val cleanName = entry.name.removePrefix("./")
@@ -1282,14 +1302,14 @@ printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decis
     companion object {
         private const val LEGACY_README = "# Pocket Dev project\n\nThis project is managed locally on Android.\n"
         private const val LEGACY_INDEX = "<!doctype html><title>Pocket Dev</title><h1>Hello from Android</h1>\n"
-        private const val ROOTFS_VERSION = "ubuntu-20.04.5-arm64"
-        private const val ROOTFS_FILE = "ubuntu-base-20.04.5-base-arm64.tar.gz"
-        private const val ROOTFS_URL = "https://cdimage.ubuntu.com/ubuntu-base/releases/20.04/release/$ROOTFS_FILE"
-        private const val ROOTFS_SHA256 = "f9b999afb4c4b10193087ea8c11be36d688f19e609b05179b571f29357954b52"
+        private const val ROOTFS_VERSION = "debian-13-trixie-arm64"
+        private const val ROOTFS_FILE = "debian-aarch64-pd-v1.10.1.tar.xz"
+        private const val ROOTFS_URL = "https://github.com/termux/proot-distro/releases/download/v1.10.1/$ROOTFS_FILE"
+        private const val ROOTFS_SHA256 = "0019dfc4b32d63c1392aa264aed2253c1e0c2fb09216f8e2cc269bbfb8bb49b5"
         private const val NODE_VERSION = "v24.19.0"
         private const val LANGUAGE_TOOLS_VERSION = "node-v24.19.0-python3-v1"
         private const val CORE_TOOLS_VERSION = "core-bundle-2026.09.4"
-        private const val SYSTEM_UPGRADE_VERSION = "ubuntu-maintenance-v1"
+        private const val SYSTEM_UPGRADE_VERSION = "debian-maintenance-v1"
         private const val ANDROID_TOOLS_VERSION = "sdk36-build-tools35-gradle8.14.3-maven-2026.09"
         private const val ANDROID_ASSET_BASE = "https://appdevforall.org/dev-assets/debug"
         private const val ANDROID_SDK_URL = "$ANDROID_ASSET_BASE/android-sdk-arm64-v8a.zip"
