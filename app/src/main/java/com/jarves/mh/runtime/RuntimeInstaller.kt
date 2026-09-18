@@ -1092,10 +1092,20 @@ printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decis
 
     private fun extractXzTar(archive: File, destination: File) {
         val deferredLinks = mutableListOf<Pair<File, File>>()
+        var archiveRoot: String? = null
         TarArchiveInputStream(XZCompressorInputStream(BufferedInputStream(archive.inputStream()))).use { tar ->
             var entry: TarArchiveEntry? = tar.nextEntry
             while (entry != null) {
-                val cleanName = entry.name.removePrefix("./")
+                val rawName = entry.name.removePrefix("./").trimStart('/')
+                if (archiveRoot == null && rawName.isNotBlank()) {
+                    archiveRoot = rawName.substringBefore('/')
+                }
+                val rootPrefix = archiveRoot?.let { "$it/" }.orEmpty()
+                val cleanName = rawName.removePrefix(rootPrefix)
+                if (cleanName.isBlank()) {
+                    entry = tar.nextEntry
+                    continue
+                }
                 val target = safeChild(destination, cleanName)
                 when {
                     entry.isDirectory -> target.mkdirs()
@@ -1106,7 +1116,8 @@ printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decis
                     }
                     entry.isLink -> {
                         target.parentFile?.mkdirs()
-                        val linkTarget = safeChild(destination, entry.linkName.removePrefix("./"))
+                        val linkName = entry.linkName.removePrefix("./").trimStart('/')
+                        val linkTarget = safeChild(destination, linkName.removePrefix(rootPrefix))
                         if (linkTarget.exists()) {
                             linkTarget.inputStream().use { input -> FileOutputStream(target).use { input.copyTo(it) } }
                         } else {
