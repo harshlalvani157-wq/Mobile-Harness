@@ -46,9 +46,15 @@ jobs:
       - name: Build debug APK
         run: ./gradlew assembleDebug --stacktrace
 
+      - name: Show generated APK files
+        shell: bash
+        run: |
+          set -euo pipefail
+          find app/build/outputs/apk -type f -name "*.apk" -print
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: mobile-harness-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: app/build/outputs/apk/**/*.apk
           if-no-files-found: error
