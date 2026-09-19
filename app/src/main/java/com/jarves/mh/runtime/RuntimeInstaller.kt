@@ -973,7 +973,9 @@ class RuntimeInstaller(private val context: Context) {
         val prootHostLibraries = File(context.cacheDir, "proot-host-libs").apply {
             mkdirs()
             context.applicationInfo.nativeLibraryDir.let { nativeDirectory ->
-                File(nativeDirectory).listFiles { file -> file.name.startsWith("libtalloc.so") }
+                File(nativeDirectory).listFiles { file ->
+                    file.name.startsWith("libtalloc.so") || file.name.startsWith("libandroid-shmem.so")
+                }
                     ?.forEach { source ->
                         val target = File(this, source.name)
                         if (!target.isFile || target.length() != source.length()) {
