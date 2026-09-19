@@ -988,13 +988,14 @@ class RuntimeInstaller(private val context: Context) {
                 }
                 put("LANG", "C.UTF-8")
                 put("TERM", "xterm-256color")
-                put("LD_LIBRARY_PATH", context.applicationInfo.nativeLibraryDir)
                 put("PROOT_NO_SECCOMP", "1")
                 put("PROOT_TMP_DIR", prootTemp.absolutePath)
                 put("PROOT_LOADER", File(context.applicationInfo.nativeLibraryDir, "libprootloader.so").absolutePath)
                 // Also protects any glibc helper Claude starts later.
                 put("GLIBC_TUNABLES", "glibc.pthread.rseq=0")
-                putAll(environment)
+                environment
+                    .filterKeys { it != "LD_LIBRARY_PATH" && it != "LD_PRELOAD" }
+                    .forEach { (key, value) -> put(key, value) }
             },
             cwd = context.filesDir.absolutePath,
             outputFile = File(context.cacheDir, "runtime-output-${System.nanoTime()}.log"),
