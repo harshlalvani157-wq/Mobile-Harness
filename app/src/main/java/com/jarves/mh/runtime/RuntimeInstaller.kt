@@ -970,20 +970,6 @@ class RuntimeInstaller(private val context: Context) {
             addAll(guestCommand)
         }
         val prootTemp = File(context.cacheDir, "proot-tmp").apply { mkdirs() }
-        val prootHostLibraries = File(context.cacheDir, "proot-host-libs").apply {
-            mkdirs()
-            context.applicationInfo.nativeLibraryDir.let { nativeDirectory ->
-                File(nativeDirectory).listFiles { file ->
-                    file.name.startsWith("libtalloc.so") || file.name.startsWith("libandroid-shmem.so")
-                }
-                    ?.forEach { source ->
-                        val target = File(this, source.name)
-                        if (!target.isFile || target.length() != source.length()) {
-                            source.inputStream().use { input -> target.outputStream().use { input.copyTo(it) } }
-                        }
-                    }
-            }
-        }
         return NativeSpawnProcess.start(
             argv = args,
             environment = buildMap {
@@ -1002,11 +988,6 @@ class RuntimeInstaller(private val context: Context) {
                 }
                 put("LANG", "C.UTF-8")
                 put("TERM", "xterm-256color")
-                // PRoot itself is an Android executable and needs libtalloc.
-                // Keep only that host dependency available to the launcher;
-                // never expose the complete Android native-library directory
-                // to Debian glibc programs.
-                put("LD_LIBRARY_PATH", prootHostLibraries.absolutePath)
                 put("PROOT_NO_SECCOMP", "1")
                 put("PROOT_TMP_DIR", prootTemp.absolutePath)
                 put("PROOT_LOADER", File(context.applicationInfo.nativeLibraryDir, "libprootloader.so").absolutePath)

@@ -12,7 +12,7 @@ set(TALLOC_ROOT "${PROJECT_ROOT}/third_party/talloc")
 
 add_library(pocketspawn SHARED pocket_spawn.c)
 
-add_library(talloc SHARED "${TALLOC_ROOT}/talloc.c")
+add_library(talloc STATIC "${TALLOC_ROOT}/talloc.c")
 target_include_directories(talloc PUBLIC "${TALLOC_ROOT}")
 target_compile_definitions(talloc PRIVATE
     _GNU_SOURCE
@@ -23,7 +23,7 @@ target_compile_definitions(talloc PRIVATE
 )
 set_target_properties(talloc PROPERTIES OUTPUT_NAME talloc SOVERSION 2)
 
-add_library(android-shmem SHARED "${SHM_ROOT}/shmem.c")
+add_library(android-shmem STATIC "${SHM_ROOT}/shmem.c")
 target_include_directories(android-shmem PUBLIC "${SHM_ROOT}")
 target_compile_definitions(android-shmem PRIVATE _PATH_TMP="/data/data/com.jarves.mh/cache/")
 target_link_libraries(android-shmem PRIVATE log android)
